@@ -12,6 +12,8 @@ ecbuild_add_executable(
   SOURCES atlas-interpolations.cc
           ScripIO.h
           ScripIO.cc
+          MaskIO.h
+          MaskIO.cc
   LIBS    atlas
 )
 
@@ -22,10 +24,23 @@ ecbuild_add_option( FEATURE NETCDF
                     DESCRIPTION "Compile support the SCRIP format"
                     REQUIRED_PACKAGES "NetCDF COMPONENTS C CXX" )
 
+ecbuild_add_option( FEATURE GRIB
+                    DESCRIPTION "Compile support the GRIB format"
+                    REQUIRED_PACKAGES "eccodes" )
+
 target_compile_definitions( atlas-interpolations PRIVATE ATLAS_HAVE_NETCDF=${HAVE_NETCDF} )
 if( HAVE_NETCDF )
   target_link_libraries( atlas-interpolations NetCDF::NetCDF_CXX )
 endif()
+
+target_compile_definitions( atlas-interpolations PRIVATE ATLAS_HAVE_GRIB=${HAVE_GRIB} )
+if( HAVE_GRIB )
+  target_link_libraries( atlas-interpolations eccodes )
+endif()
+
+ecbuild_add_executable( TARGET atlas-mask-interpolate
+                        SOURCES atlas-mask-interpolate.cc MaskIO.h MaskIO.cc
+                        LIBS atlas )
 
 function( atlas_test_app_atlas_interpolations case nprocs )
 
@@ -109,6 +124,108 @@ function( atlas_test_app_atlas_interpolations case nprocs )
 endfunction()
 
 if (HAVE_TESTS)
+  ecbuild_add_executable(
+    TARGET atlas-test-interpolate-mask
+    SOURCES test_interpolate_mask.cc MaskIO.h MaskIO.cc
+    LIBS atlas
+    NOINSTALL
+  )
+
+  set( interpolate_mask_source test_interpolate_mask_source.atlas )
+  set( interpolate_mask_target test_interpolate_mask_target.atlas )
+
+  ecbuild_add_test(
+    TARGET atlas_test_app_atlas_mask_interpolate_setup
+    COMMAND atlas-test-interpolate-mask
+    ARGS write ${interpolate_mask_source} O8
+    ENVIRONMENT ${ATLAS_TEST_ENVIRONMENT}
+  )
+  ecbuild_add_test(
+    TARGET atlas_test_app_atlas_mask_interpolate
+    COMMAND atlas-mask-interpolate
+    ARGS ${interpolate_mask_source}
+         O8
+         --output=${interpolate_mask_target}
+         --output-gmsh
+    ENVIRONMENT ${ATLAS_TEST_ENVIRONMENT}
+  )
+  ecbuild_add_test(
+    TARGET atlas_test_app_atlas_mask_interpolate_check
+    COMMAND atlas-test-interpolate-mask
+    ARGS check ${interpolate_mask_target} O8
+    ENVIRONMENT ${ATLAS_TEST_ENVIRONMENT}
+  )
+  set_tests_properties( atlas_test_app_atlas_mask_interpolate PROPERTIES
+                        DEPENDS atlas_test_app_atlas_mask_interpolate_setup )
+  set_tests_properties( atlas_test_app_atlas_mask_interpolate_check PROPERTIES
+                        DEPENDS atlas_test_app_atlas_mask_interpolate )
+
+  # Stencil extraction (--output-stencil): generate a masked source, extract a stencil, and validate
+  # the resulting ASCII file with a CMake script.
+  set( stencil_source_mask stencil_source_O16.atlas )
+  set( stencil_file        stencil_test.txt )
+
+  ecbuild_add_test(
+    TARGET atlas_test_app_atlas_interpolations_stencil_setup
+    COMMAND atlas-test-interpolate-mask
+    ARGS write ${stencil_source_mask} O16
+    ENVIRONMENT ${ATLAS_TEST_ENVIRONMENT}
+  )
+  ecbuild_add_test(
+    TARGET atlas_test_app_atlas_interpolations_stencil
+    COMMAND atlas-interpolations
+    ARGS --s.grid=O16
+         --t.grid=O32
+         --i.type=finite-element
+         --s.mask=${stencil_source_mask}
+         --output-stencil
+         --stencil.target-lonlat=10,45
+         --stencil.source-context=6
+         --stencil.target-context=6
+         --stencil.file=${stencil_file}
+    ENVIRONMENT ${ATLAS_TEST_ENVIRONMENT}
+  )
+  ecbuild_add_test(
+    TARGET atlas_test_app_atlas_interpolations_stencil_check
+    COMMAND ${CMAKE_COMMAND}
+    ARGS -DSTENCIL_FILE=${stencil_file}
+         -DEXPECT_SOURCE_MASK=1
+         -DEXPECT_SOURCE_MESH=1
+         -DEXPECT_TARGET_CONTEXT=1
+         -P ${CMAKE_CURRENT_SOURCE_DIR}/check_stencil.cmake
+  )
+  set_tests_properties( atlas_test_app_atlas_interpolations_stencil PROPERTIES
+                        DEPENDS atlas_test_app_atlas_interpolations_stencil_setup )
+  set_tests_properties( atlas_test_app_atlas_interpolations_stencil_check PROPERTIES
+                        DEPENDS atlas_test_app_atlas_interpolations_stencil )
+
+  # Conservative interpolation gives a mesh-based target function space, so the stencil also
+  # contains target-mesh cells (D records). This exercises the target-context / target-mesh path.
+  set( stencil_cons_file stencil_cons_test.txt )
+  ecbuild_add_test(
+    TARGET atlas_test_app_atlas_interpolations_stencil_cons
+    COMMAND atlas-interpolations
+    ARGS --s.grid=O16
+         --t.grid=O32
+         --i.type=cons
+         --output-stencil
+         --stencil.target-lonlat=10,45
+         --stencil.source-context=4
+         --stencil.file=${stencil_cons_file}
+    ENVIRONMENT ${ATLAS_TEST_ENVIRONMENT}
+  )
+  ecbuild_add_test(
+    TARGET atlas_test_app_atlas_interpolations_stencil_cons_check
+    COMMAND ${CMAKE_COMMAND}
+    ARGS -DSTENCIL_FILE=${stencil_cons_file}
+         -DEXPECT_SOURCE_MESH=1
+         -DEXPECT_TARGET_MESH=1
+         -DEXPECT_TARGET_CONTEXT=1
+         -P ${CMAKE_CURRENT_SOURCE_DIR}/check_stencil.cmake
+  )
+  set_tests_properties( atlas_test_app_atlas_interpolations_stencil_cons_check PROPERTIES
+                        DEPENDS atlas_test_app_atlas_interpolations_stencil_cons )
+
   unset(cases)
   list( APPEND cases
     O16/O32/finite-element
@@ -163,6 +280,43 @@ if (HAVE_TESTS)
     atlas_test_app_atlas_interpolations( ${case} "${nprocs}" )
   endforeach()
 
+endif()
 
+ecbuild_add_executable( TARGET atlas-mask-diff
+                        SOURCES atlas-mask-diff.cc MaskIO.h MaskIO.cc
+                        LIBS atlas )
 
+if( HAVE_NETCDF )
+  ecbuild_add_executable( TARGET atlas-mask-extract
+                          SOURCES atlas-mask-extract.cc MaskIO.h MaskIO.cc
+                          LIBS atlas NetCDF::NetCDF_CXX )
+
+  if( HAVE_TESTS )
+    set( extract_field_source test_extract_field_source.atlas )
+    set( extract_field_mask test_extract_field_mask.atlas )
+
+    ecbuild_add_test(
+      TARGET atlas_test_app_atlas_mask_extract_field_setup
+      COMMAND atlas-test-interpolate-mask
+      ARGS write-field ${extract_field_source} O8
+      ENVIRONMENT ${ATLAS_TEST_ENVIRONMENT}
+    )
+    ecbuild_add_test(
+      TARGET atlas_test_app_atlas_mask_extract_field
+      COMMAND atlas-mask-extract
+      ARGS ${extract_field_source} ${extract_field_mask}
+           --atlas-field --field-index=0 --missing-value=9999
+      ENVIRONMENT ${ATLAS_TEST_ENVIRONMENT}
+    )
+    ecbuild_add_test(
+      TARGET atlas_test_app_atlas_mask_extract_field_check
+      COMMAND atlas-test-interpolate-mask
+      ARGS check-extracted ${extract_field_mask} O8
+      ENVIRONMENT ${ATLAS_TEST_ENVIRONMENT}
+    )
+    set_tests_properties( atlas_test_app_atlas_mask_extract_field PROPERTIES
+                          DEPENDS atlas_test_app_atlas_mask_extract_field_setup )
+    set_tests_properties( atlas_test_app_atlas_mask_extract_field_check PROPERTIES
+                          DEPENDS atlas_test_app_atlas_mask_extract_field )
+  endif()
 endif()
